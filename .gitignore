@@ -1,0 +1,6 @@
+work/
+my files/
+dist/
+__pycache__/
+*.bin
+*.state*
