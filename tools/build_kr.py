@@ -50,6 +50,10 @@ def fix_row(jp, kr):
                 j, k = ln.rstrip('\n').split('\t'); _fixes['kun'][j] = k
     if jp in _fixes['kun']:
         return _fixes['kun'][jp]
+    # 아이템 이름 조각에 PC 번역이 조사까지 붙여 둔 곳(«《꽃다발》이»·«《음악상자》를») 뒤에 오는 조각의 조사 중복 떼기
+    # (장면 385 「が必要な…」 «이가 필요해», 장면 5 「を買っちゃうぞ。」 «를를 사») — 2026-10-23 실기
+    if (jp.startswith('が必要な') and kr.startswith('가 ')) or (jp.startswith('を買っちゃう') and kr.startswith('를 ')):
+        kr = kr[1:]
     if jp.startswith('］：') and kr.startswith('］') and not kr.startswith('］：'):   # PC 번역의 «］고，»·«］ ：» 깨짐
         kr = '］：' + kr[1:].lstrip(' ：')
     for a, b in FRIEND_TAGS.items():                # 「［」+주인공 이름+「の嫌いな友達］：」 꼴 이름표 뒷조각
@@ -110,6 +114,15 @@ def load_rows(mes=None):
             elif jp in _fixes['kun']:                   # 어디에도 없던 22문장 = PC 판 번역을 work/tr_fix_kun.tsv 에
                 by[sc].append((t, jp, clean(fix_row(jp, _fixes['kun'][jp]))))
         if sc in by: by[sc].sort()
+    # 아이템 이름 조각 + 「が必要な…」 장면(385): 아이템 조각 끝 조사를 받침에 맞춰 이/가로 통일
+    # (PC 번역 오타 «》기», 조사 없는 감기약 3개 — 2026-10-23 실기 «풍경화》기 필요해»). 뒤 조각의 「가」는 fix_row 가 뗌.
+    for sc, lst in by.items():
+        if not any(jp.startswith('が必要な') for _, jp, _ in lst): continue
+        for i, (p, jp, kr) in enumerate(lst):
+            m = re.fullmatch('(《([^》]*)》)[이가기]?', kr) if kr and re.fullmatch('《[^》]*》', jp) else None
+            if m:
+                last = [c for c in m.group(2) if is_kr(c)][-1:]
+                lst[i] = (p, jp, m.group(1) + ('이' if last and (ord(last[0]) - 0xAC00) % 28 else '가'))
     # 이름 자리 앞 띄어쓰기:다음 조각이 「君」(이름 바로 뒤)이고 이 조각 번역이 한글로 끝나면 한 칸(«나는하스피» → «나는 하스피»)
     for sc, lst in by.items():
         raw = open(W('disc1', 'mes', '%03d.bin' % sc), 'rb').read()
@@ -129,6 +142,7 @@ NARROW = 0x818F                                     # 대사 루프(0x06014104)�
 NARROW_PX = 12
 CENTER_PX = 307                                     # 오프닝 가운데 줄 중심(원문: ￥ 줄 12+28×10.5, 아닌 줄 28×11)
 DIALOG_FN = 0x0609C260                              # 장면 코드가 대사 문자열을 넘기는 함수(선택지·메뉴는 0x0609C5A8)                                       # 0x818F = 글꼴 없는 제어 코드(오프닝 등 가운데 줄) — 다시 그리지 않고 그대로
+CHOICE_FN = 0x0609C5A8                              # 선택지·메뉴 항목 → 선택지 창이 0x06016344 로 그림(1바이트 = 반각 14px)
 
 def center(jp, kr):
     """원문이 (￥)+전각 공백으로 가운데를 맞춘 줄(오프닝·엔딩 내레이션 234조각)은 번역도 같은 가운데로.
@@ -208,18 +222,19 @@ def plan_font(exe, rows, extra=(), skip=(), pinned=None):
     lost = sum(jp[c] % 100000 for c in dropped)
     return cmap, keep, dropped, nokeep, lost, sum(v % 100000 for c, v in jp.items() if c != '　')
 
-def make_enc(cmap, narrow=False):
+def make_enc(cmap, narrow=False, half=False):
     """narrow=True: 대사 창 문자열 — 띄어쓰기를 0x818F(12px)로. 선택지·메뉴·0.BIN 은 전각 공백(28px)."""
     def enc(s):
         b = bytearray()
         for ch in s:
             if ch in cmap: b += struct.pack('>H', cmap[ch][0])
+            elif ch == ' ' and half: b += b' '            # 선택지 창(0x06016344)은 1바이트를 반각 글꼴로 14px 진행 — ANK 0x20 = 빈칸
             elif ch == ' ': b += struct.pack('>H', NARROW if narrow else SPACE)
             else: b += ch.encode('cp932')
         return bytes(b)
     return enc
 
-def dialog_frags(raw):
+def dialog_frags(raw, fn=None):
     """장면 코드에서 문자열 주소를 레지스터에 싣고 몇 명령 안에 JSR 하는 곳을 찾아, 대사 함수(DIALOG_FN)로만 가는 조각 위치."""
     n = len(raw); calls = collections.defaultdict(set)
     def lit(p):
@@ -237,16 +252,18 @@ def dialog_frags(raw):
             w = struct.unpack_from('>H', raw, q)[0]
             if (w & 0xF0FF) == 0x400B:
                 calls[x[1] - BASE].add(regs.get((w >> 8) & 0xF)); break
-    return {p for p, s in calls.items() if s == {DIALOG_FN}}
+    fn = fn or DIALOG_FN
+    return {p for p, s in calls.items() if s == {fn}}
 
-def rebuild_scene(raw, lst, enc, enc_dialog=None):
+def rebuild_scene(raw, lst, enc, enc_dialog=None, enc_choice=None):
     narrow = dialog_frags(raw) if enc_dialog else set()
+    halfw = dialog_frags(raw, CHOICE_FN) if enc_choice else set()      # 선택지 함수로만 가는 조각 = 반각 띄어쓰기
     raw = bytearray(raw); n0 = len(raw)
     frag = {}
     for pos, jp, kr in lst:
         jb = jp.encode('cp932')
         assert raw[pos:pos + len(jb)] == jb and raw[pos + len(jb)] == 0, (pos, jp)
-        e = enc_dialog if pos in narrow else enc
+        e = enc_dialog if pos in narrow else (enc_choice if pos in halfw else enc)
         frag[pos] = (jb, e(kr) + b'\0' if kr else None)
     inside = set()
     for pos, (jb, _) in frag.items():
@@ -356,7 +373,7 @@ def main():
     for ch, (code, g) in cmap.items():
         f = poc.KFONT if ord(ch) in KFONT_CMAP else FALLBACK_FONT          # 나눔고딕에 없는 글자(゛゜ヽ 등)는 유고딕
         font[g * 196:(g + 1) * 196] = fontprev.render(f, ch)
-    enc = make_enc(cmap); enc_dialog = make_enc(cmap, narrow=True)
+    enc = make_enc(cmap); enc_dialog = make_enc(cmap, narrow=True); enc_choice = make_enc(cmap, half=True)
     fmt_ranges = []
     for jp, kr in FMT_PATCHES:                      # 세이브 화면 printf 형식 문자열(%2s 등 반각 섞임, 홀수 주소라 추출 밖)
         jb = jp.encode('cp932') + b'\0'; kb = enc(kr) + b'\0'
@@ -365,7 +382,8 @@ def main():
         exe[hits[0]:hits[0] + len(jb)] = kb + bytes(len(jb) - len(kb)); fmt_ranges.append((hits[0], hits[0] + len(jb)))
     for o, t, ln in bins:
         if any(a <= o < b for a, b in fmt_ranges): continue      # 형식 문자열 뒷조각(예: 「のポスターを…」)은 위에서 통째로
-        b = enc(t); assert len(b) <= ln, (hex(o), t)
+        b = enc(t)
+        if len(b) > ln: moved.append((o, t)); continue           # 가운데 맞춤 공백까지 넣으면 넘침 → 끝으로 옮김(아래)
         exe[o:o + ln] = b + bytes(ln - len(b))
     # 예산 넘친 화면 문자열: 0.BIN 파일 끝 뒤 RAM(0x0609C6D8~0x060A0000 — 스테이트 10장 모두 0, 참조 없음, BSS 0x0606E8D0~0x06099944 밖)
     # 에 덧붙이고 그 문자열을 가리키는 32비트 주소를 전부 옮긴다. 0.BIN 이 커지므로 build_track 이 디렉터리 크기를 고친다.
@@ -388,7 +406,7 @@ def main():
     for k in range(600):
         raw = elfpak.unpack(arc[offs[k]:offs[k + 1]])[0]
         if rows.get(k):
-            raw, nm, nt = rebuild_scene(raw, rows[k], enc, enc_dialog)
+            raw, nm, nt = rebuild_scene(raw, rows[k], enc, enc_dialog, enc_choice)
             stat['moved'] += nm; stat['tail'] += nt
         assert len(raw) <= LIMIT, ('장면 버퍼 초과', k, len(raw))
         raws.append(raw)

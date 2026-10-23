@@ -95,9 +95,9 @@ def bin_text(exe, off, jp, tr, bud):
     if s.strip('　') != jp or len(s) != bud: return None
     lead = len(s) - len(s.lstrip('　'))
     padded = s.endswith('　')
-    if padded or lead:                                 # 메뉴 칸(공백으로 채운 줄)은 원문 글자 폭 안 가운데(「하급생 이어하기」와 같게)
+    if padded or lead:                                 # 메뉴 칸(공백으로 채운 줄)은 원문 글자 가운데에 맞춤(「하급생 이어하기」와 같게)
         lead += max(0, len(jp) - len(tr)) // 2
-    lead = min(lead, bud - len(tr))
+    lead = min(lead, bud - len(tr))                  # ⛔메뉴 칸은 원래 글자 수만 그린다 — 예산 넘기는 정렬 금지(2026-10-23 «機» 깨짐, 사용자 «정렬하지마»)
     t = '　' * lead + tr
     if padded: t += '　' * (bud - len(t))
     return t, end - off
