@@ -92,6 +92,7 @@ def load_rows(mes=None):
         if mes and jp in mes and (not kr or JPCH.search(kr)):
             kr = fix_row(jp, mes[jp]); n += 1         # 번역할것 파일 번역에도 같은 손질(괄호 설명 등)
         kr = clean(kr) if kr else ''
+        kr = re.sub('[１1] ?번 ?도', '한 번도', kr)       # 「１번도」 → 「한 번도」(사용자 지시 2026-10-23)
         if kr: kr = center(jp, kr)
         by[int(sc)].append((int(pos, 16), jp, kr))
     # 추출 때 빠진 조각(장면 파일 맨 앞 오프셋 4 — 앞 바이트가 포인터라 satlines 가 못 잡음, 282곳·49문장, 2026-10-23 «［麗子］：……。»):
