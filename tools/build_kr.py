@@ -78,7 +78,7 @@ KUN_PART = {'은（는）': '는', '와（과）': '와', '이（가）': '가',
 GLUE = re.compile('[했해하한겠냐가라이야는은을를지로다니에의와과도만’》，．？！…）) ]')
 GLOSS = re.compile(r'(?<=[가-힣Ａ-Ｚａ-ｚ０-９])\s?（(?!？）)[^（）]{1,30}）')
 
-def load_rows(mes=None):
+def load_rows(mes=None, centered=True):
     """mes = 번역할것 파일의 {원문: 번역} — 같은 원문 조각 중 번역이 비었거나 가나·한자가 남은 것에 넣는다."""
     by = collections.defaultdict(list); n = 0
     user = {}                                       # 사용자 번역(건너뛴 줄·이름 자리 안 맞던 줄) — tools/import_user_tr.py
@@ -93,7 +93,7 @@ def load_rows(mes=None):
             kr = fix_row(jp, mes[jp]); n += 1         # 번역할것 파일 번역에도 같은 손질(괄호 설명 등)
         kr = clean(kr) if kr else ''
         kr = re.sub('[１1] ?번 ?도', '한 번도', kr)       # 「１번도」 → 「한 번도」(사용자 지시 2026-10-23)
-        if kr: kr = center(jp, kr)
+        if kr and centered: kr = center(jp, kr)
         by[int(sc)].append((int(pos, 16), jp, kr))
     # 추출 때 빠진 조각(장면 파일 맨 앞 오프셋 4 — 앞 바이트가 포인터라 satlines 가 못 잡음, 282곳·49문장, 2026-10-23 «［麗子］：……。»):
     # 장면 안 32비트 주소가 가리키는 4정렬 전각 SJIS 문자열 중 표에 없는 것 → 같은 원문의 번역(가장 많이 쓴 것)으로 채운다
@@ -124,15 +124,22 @@ def load_rows(mes=None):
             if m:
                 last = [c for c in m.group(2) if is_kr(c)][-1:]
                 lst[i] = (p, jp, m.group(1) + ('이' if last and (ord(last[0]) - 0xAC00) % 28 else '가'))
-    # 이름 자리 앞 띄어쓰기:다음 조각이 「君」(이름 바로 뒤)이고 이 조각 번역이 한글로 끝나면 한 칸(«나는하스피» → «나는 하스피»)
+    name_space(by)
+    return by, n
+
+def name_space(by):
+    """이름 자리 앞 띄어쓰기:다음 조각이 「君」(이름 바로 뒤)이고 이 조각 번역이 한글로 끝나면 한 칸(«나는하스피» → «나는 하스피»).
+    번역표 방식(load_table)에도 적용(2026-10-24 실기 «그런데하스피군» — 새 번역표엔 앞 칸이 없음). → 붙인 조각 수"""
+    n = 0
     for sc, lst in by.items():
         raw = open(W('disc1', 'mes', '%03d.bin' % sc), 'rb').read()
         nxt = {p: j for p, j, k in lst}
         for i, (p, jp, kr) in enumerate(lst):
             e = p + len(jp.encode('cp932')); q = (e + 4) & ~3
-            if kr and re.search('[가-힣]$', kr) and nxt.get(q, '').startswith('君') and not any(raw[e:q]):
-                lst[i] = (p, jp, kr + ' ')
-    return by, n
+            gap = raw[e:q]                          # 사이 = 0 패딩, 또는 «00 00 00 09»(09 = 주인공 이름 넣기 — 2026-10-25 실기 «그야하스피군», 171곳 빠져 있었음)
+            if kr and re.search('[가-힣]$', kr) and nxt.get(q, '').startswith('君') and (not any(gap) or (gap[-1:] == b'\x09' and not any(gap[:-1]))):
+                lst[i] = (p, jp, kr + ' '); n += 1
+    return n
 
 from fontTools.ttLib import TTFont
 KFONT_CMAP = set(TTFont(poc.KFONT).getBestCmap())
@@ -327,6 +334,28 @@ def locate(exe):
     poc.REC = (poc.REC[0] + r, poc.REC[1] + r); poc.NAME_REC += r
     return GP8_REC + t
 
+# 작업 키트(2026-10-23): 번역표 두 개만 읽는 방식 — tools/export_table.py 가 지금까지의 번역(여러 겹 + 자동 규칙)을 합친 결과.
+# 번역/번역표_대사.tsv(장면·위치·원문·번역) · 번역/번역표_시스템.tsv(위치(디스크 1 0.BIN, FMT = 세이브 화면 형식)·원문·번역·예산)
+TABLE_DIR = os.path.join(ROOT, '번역')
+
+def load_table():
+    by = collections.defaultdict(list); binr = {}; fmt = []
+    for ln in open(os.path.join(TABLE_DIR, '번역표_대사.tsv'), encoding='utf-8-sig').read().split('\n')[1:]:
+        if not ln.strip(): continue
+        sc, pos, jp, kr = (ln.rstrip('\r').split('\t') + [''])[:4]       # 번역 앞뒤 띄어쓰기도 그대로(이름 자리 앞 한 칸 등)
+        kr = clean(kr) if kr.strip() else ''
+        if kr: kr = center(jp, kr)
+        by[int(sc)].append((int(pos, 16), jp, kr))
+    for lst in by.values(): lst.sort()
+    name_space(by)
+    for ln in open(os.path.join(TABLE_DIR, '번역표_시스템.tsv'), encoding='utf-8-sig').read().split('\n')[1:]:
+        if not ln.strip(): continue
+        o, jp, kr, bud = (ln.rstrip('\r').split('\t') + ['', ''])[:4]
+        if not kr.strip(): continue
+        if o == 'FMT': fmt.append((jp, kr))
+        else: binr[int(o, 16)] = (jp, kr, int(bud))
+    return by, binr, fmt
+
 def _pack(a):
     return elfpak.pack_opt(a)
 
@@ -338,8 +367,13 @@ def main():
     gp8_rec = locate(exe) if disc != 1 else GP8_REC
     font = bytearray(open(os.path.join(src, 'SJIS2.KNJ'), 'rb').read())
     arc = open(os.path.join(src, 'MES.ARC'), 'rb').read()
-    mes, binr, bad = todo_tr.load()
-    rows, nmes = load_rows(mes)
+    global FMT_PATCHES
+    if os.path.exists(os.path.join(TABLE_DIR, '번역표_대사.tsv')):
+        rows, binr, fmt = load_table(); mes, nmes, bad = {}, 0, []
+        FMT_PATCHES = fmt                               # 번역표에 쓴 형식 문자열만(빈칸이면 원문 그대로)
+    else:
+        mes, binr, bad = todo_tr.load()
+        rows, nmes = load_rows(mes)
     # 0.BIN 번역: 오프셋은 디스크 1 기준 → 다른 장은 같은 원래 문자열(+NUL)이 한 곳뿐일 때만
     exe1 = open(W('disc1', '0.BIN'), 'rb').read()
     bins, bin_skip, moved = [], 0, []
@@ -437,6 +471,10 @@ def main():
     pexe = open(W('poc', '0.BIN'), 'rb').read()
     assert exe[gp8_rec:gp8_rec + 4] == pexe[GP8_REC:GP8_REC + 4]
     exe[gp8_rec + 4:gp8_rec + 8] = pexe[GP8_REC + 4:GP8_REC + 8]
+    # GP8 422 = 메인 메뉴 배경(tools/menubg.py bake — 팻말 «하급생»·크레딧), 위치표 칸 = 807 칸 − 12×385(2026-10-24)
+    r422, p422 = gp8_rec - 12 * 385, GP8_REC - 12 * 385
+    assert exe[r422:r422 + 4] == pexe[p422:p422 + 4]
+    exe[r422 + 4:r422 + 8] = pexe[p422 + 4:p422 + 8]
     for n in ('GP8.ARC', 'BMP.ARC', 'NAME.DAT', 'TITLE.DAT'):                     # TITLE.DAT = 제목 로고(tools/titlegfx.py bake)
         assert open(W('disc%d' % disc, n), 'rb').read() == open(W('disc1', n), 'rb').read(), n
         shutil.copyfile(W('poc', n), os.path.join(out, n))          # NAME.DAT = 선택 버튼 4장

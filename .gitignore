@@ -4,3 +4,4 @@ dist/
 __pycache__/
 *.bin
 *.state*
+번역/

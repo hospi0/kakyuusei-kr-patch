@@ -14,7 +14,7 @@ import elfpak, poc
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 W = lambda *p: os.path.join(ROOT, 'work', *p)
-KFONT = r'C:\claude\utils\font\nanum-gothic\NanumGothicBold.ttf'
+from paths import KFONT
 ROW_Y = [45, 61, 77, 93, 109, 126]
 GRP_X = [93, 261, 430]
 PITCH, CW, CH = 23.75, 22, 12

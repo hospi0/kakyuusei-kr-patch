@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 sys.path.insert(0, os.path.dirname(__file__))
 import bdf, elfpak, fontprev
-KFONT = r'C:\claude\utils\font\nanum-gothic\NanumGothicBold.ttf'
+from paths import KFONT
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 W = lambda *p: os.path.join(ROOT, 'work', *p)
