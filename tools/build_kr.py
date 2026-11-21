@@ -12,7 +12,7 @@
 import collections, os, re, shutil, struct, sys
 from concurrent.futures import ProcessPoolExecutor
 sys.path.insert(0, os.path.dirname(__file__))
-import elfpak, fontprev, poc, todo_tr
+import elfpak, fontprev, poc, todo_tr, name_hook
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 W = lambda *p: os.path.join(ROOT, 'work', *p)
@@ -180,8 +180,34 @@ def ui_strings(exe, skip=()):
             out.append(s)
     return out
 
+def name_extra():
+    """KS X 1001 한글 2350 − work/name_cut_final.txt(Kiwi 사전에 없는 음절 중 76 살린 나머지 385, 하스피 11-22)"""
+    p = W('name_cut_final.txt')
+    if not os.path.exists(p): return set()
+    cut = set(open(p, encoding='utf-8').read())
+    p2 = W('name_cut_jamo29.txt')                   # 2026-11-22 자모 40칸 자리 — 쓰임 가장 적은 29 더 뺌(하스피 선택)
+    if os.path.exists(p2): cut |= set(open(p2, encoding='utf-8').read().strip())
+    out = set()
+    for hi in range(0xB0, 0xC9):
+        for lo in range(0xA1, 0xFF):
+            try: ch = bytes([hi, lo]).decode('euc_kr')
+            except UnicodeDecodeError: continue
+            if '가' <= ch <= '힣' and ch not in cut: out.add(ch)
+    return out
+
+
+def jp_must():
+    p = W('nonhangul_need.txt')                     # 대사·화면에 쓰이는 비한글 130자(부호·전각 숫자·일본 글자 49) — 무조건 칸
+    return set(open(p, encoding='utf-8').read().strip()) if os.path.exists(p) else set()
+
+
 def plan_font(exe, rows, extra=(), skip=(), pinned=None):
     kr, jp = set(), collections.Counter()
+    real = set(jp_must())                           # 2026-11-22: 원본 0.BIN 조각(ui_strings)에서만 나온 글꼴 밖 글자(デ灘·＿ヽ 같은 바이트 잡음)는 새로 그리지 않음
+    for s in extra:
+        if any(is_kr(c) for c in s): real.update(s)   # 번역한 화면 문자열만(extra 에는 다른 장 원본 조각도 섞여 있음)
+    for lst in rows.values():
+        for _, j, k in lst: real.update(k or j)
     for s in extra:                                 # 0.BIN 에 넣을 번역(화면 글자라 우선)
         for c in s:
             if is_kr(c): kr.add(c)
@@ -193,8 +219,12 @@ def plan_font(exe, rows, extra=(), skip=(), pinned=None):
                 elif c != ' ' and c not in CTRL: jp[c] += 1
     for s in ui_strings(exe, skip):                 # 화면 글자는 우선
         for c in s: jp[c] += 100000
-    for s in (poc.NAME_SYLL, poc.TITLE[1], poc.DEFAULT_NAME[1]):
+    for s in (poc.TITLE[1], poc.DEFAULT_NAME[1]):
         kr.update(c for c in s if is_kr(c))
+    kr.update(c for c in poc.BOARD if c != '　')   # 2026-11-22 조합형 입력판: 자모 40(호환 자모, 새로 그림) + 2쪽 음절
+    kr.update(name_extra())                       # 2026-11-22 조합형 이름 입력: KS 2350 − 쓰레기 385(work/name_cut_final.txt) 전부
+    for c in jp_must():
+        jp[c] += 10 ** 8                          # 포인터로 쓰이는 남은 일본 문자열 글자 49 — 칸 우선
     jp['　'] += 10 ** 9
     code = lambda c: struct.unpack('>H', c.encode('cp932'))[0]
     have = {}
@@ -204,12 +234,13 @@ def plan_font(exe, rows, extra=(), skip=(), pinned=None):
         except (UnicodeEncodeError, struct.error):
             g = -1
         if 0 <= g < CELLS: have[c] = g
-    nokeep = [c for c in jp if c not in have]       # 원래 글꼴에 없는 글자(전각 쉼표 «，» 등) → 한글처럼 새로 그린다
+    nokeep = [c for c in jp if c not in have and c in real]       # 원래 글꼴에 없는 글자(전각 쉼표 «，» 등) → 한글처럼 새로 그린다
     kr |= set(nokeep)
     # 고정 배정(work/font_map.tsv): 전에 쓴 글자는 같은 코드 그대로 — 백업 RAM 에 저장된 주인공 이름이 빌드마다 바뀌지 않게
     pin = {}
     for ch, c in (pinned or {}).items():
         if ch in kr: pin[ch] = (c, poc.glyph_no(exe, c))
+    assert len({c for c, _ in pin.values()}) == len(pin), '고정 코드 겹침(font_map.tsv 에 같은 코드 두 글자) — 2026-11-22 정리: work/font_map_stale.txt'
     pin_cells = {g for _, g in pin.values()}
     room = CELLS - len(kr)
     keep = [c for c, _ in sorted(((c, jp[c]) for c in have if have[c] not in pin_cells), key=lambda x: -x[1])][:room]
@@ -228,6 +259,9 @@ def plan_font(exe, rows, extra=(), skip=(), pinned=None):
         cmap[ch] = (cell_code[g], g)
     dropped = [c for c in have if have[c] not in kept_cells]
     lost = sum(jp[c] % 100000 for c in dropped)
+    lost_chars = sorted(((c, jp[c] % 100000) for c in dropped if jp[c] % 100000), key=lambda x: -x[1])
+    print('글꼴에 없던 글자(새로 그림):', ' '.join('%s×%d' % (c, jp[c] % 100000) for c in nokeep))
+    if lost_chars: print('깨져 보일 글자:', ' '.join('%s×%d' % x for x in lost_chars[:20]))
     return cmap, keep, dropped, nokeep, lost, sum(v % 100000 for c, v in jp.items() if c != '　')
 
 def make_enc(cmap, narrow=False, half=False):
@@ -315,6 +349,7 @@ FMT_PATCHES = [                                    # 세이브·로드 칸 표�
     ('］：よっしゃあ、%sのポスターをＧＥＴしたぜ！！', '］：좋았어，%s의 포스터를 ＧＥＴ했다！！'),     # 게임센터 포스터 뽑기
     ('］：%sのポスターはもう持ってるけど……まあいいか。', '］：%s의 포스터는 이미 있지만……뭐 괜찮겠지．'),
 ]
+NAME_HOOK_LIMIT = 0x0609FC00                       # 이름 조합 훅 블롭 상한(0x0609CC7C~0x0609FFFF 스테이트 36장 모두 0·참조 0, 2026-11-22)
 EXT_LIMIT = 0x0609F000                             # 0.BIN 덧붙임 상한(RAM) — 장면 버퍼 0x060A0000 앞 4 KB 여유
 GP8_REC = 0x5A27C                                 # 디스크 1 기준 GP8 807 위치표(섹터·크기) — namegfx.GP8_REC_SIZE-4
 
@@ -466,6 +501,9 @@ def main():
     hits = [m.start() for m in re.finditer(re.escape(tj), exe)]; assert len(hits) == 2
     for p in hits: exe[p:p + len(tj)] = tk
     poc.write_name_grid(exe, enc)
+    # 2026-11-22 조합형 이름 입력 훅 + 자모·음절 표 → 0.BIN 끝(덧붙인 화면 문자열 뒤), 상한 = 장면 버퍼 0x060A0000 앞 1 KB
+    nb, hb = name_hook.apply(exe, {ch: code for ch, (code, g) in cmap.items()}, NAME_HOOK_LIMIT)
+    print('이름 조합 훅: 0x%08X~0x%08X (%d B)' % (hb, hb + nb, nb))
     files = {'0.BIN': exe, 'SJIS2.KNJ': font, 'MES.ARC': newarc}
     # 이름 입력 그림(namegfx bake 결과, GP8·BMP·NAME 은 3장 같은 파일) + GP8 807 위치표 크기(bake 가 디스크 1 기준 PoC 0.BIN 에 적은 값)
     pexe = open(W('poc', '0.BIN'), 'rb').read()

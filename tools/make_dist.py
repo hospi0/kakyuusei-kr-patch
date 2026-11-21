@@ -9,7 +9,7 @@ r"""배포 묶음 (2026-10-23) — dist/<NAME>/ : 디스크별 트랙 1 xdelta 3
 import glob, hashlib, os, shutil, subprocess, sys, zipfile
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 
-VER = 'v0.9'
+VER = 'v0.91'
 sys.path.insert(0, HERE)
 from paths import XDELTA
 from extract import track1

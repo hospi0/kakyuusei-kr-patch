@@ -18,6 +18,21 @@ CANDS = [
 ]
 SS = 8                                     # 세로 확대 배율(칸 14 → 112)
 
+def is_jamo(ch): return 0x3131 <= ord(ch) <= 0x318E
+
+
+def jamo_fit(f, ch, bw, bh, fill=0.9):
+    """호환 자모(ㄱ·ㅏ…)는 글꼴에서 작고 납작하게 그려진다 → 잉크만 잘라 «가» 잉크 상자(bw×bh)의 fill 높이로 비율 유지 확대(2026-11-22 조합형 입력)"""
+    big = Image.new('L', (bw * 3, bh * 3), 0); d = ImageDraw.Draw(big)
+    d.text((bw, bh), ch, font=f, fill=255)
+    ink = big.crop(big.getbbox())
+    sc = min(bh * fill / ink.height, 1.7)             # 높이 맞춤(ㅡ 처럼 얇은 획이 덩어리가 되지 않게 1.7배까지) — 넓적한 자음(ㄱ 106×56)은 폭만 칸의 80% 로 눌러 담음
+    ink = ink.resize((max(1, min(round(ink.width * sc), round(bw * 0.8))), max(1, round(ink.height * sc))), Image.LANCZOS)
+    out = Image.new('L', (bw, bh), 0)
+    out.paste(ink, ((bw - ink.width) // 2, (bh - ink.height) // 2))
+    return out
+
+
 def render(fontpath, ch, size_px=12):
     """한 글자 → 원본 형식 196 B. size_px = 칸 안 잉크 목표 높이(세로 화소)."""
     big = 14 * SS
@@ -27,7 +42,10 @@ def render(fontpath, ch, size_px=12):
     l, t, r, b = d.textbbox((0, 0), '가', font=f)          # 한글 기준 상자로 모든 글자 위치를 맞춤(부호 기준선 유지)
     ox = (big - (r - l)) // 2 - l
     oy = SS * 1 + (size_px * SS - (b - t)) // 2 - t
-    d.text((ox, oy), ch, font=f, fill=255)
+    if is_jamo(ch):
+        im.paste(jamo_fit(f, ch, r - l, b - t), (ox + l, oy + t))
+    else:
+        d.text((ox, oy), ch, font=f, fill=255)
     a = np.asarray(im, np.float32) / 255.0
     cov = a.reshape(14, SS, 28, big // 28).mean(axis=(1, 3))   # 14×28 (세로 8·가로 4 평균)
     lvl = np.clip(np.rint(cov * 7), 0, 7).astype(np.uint8)

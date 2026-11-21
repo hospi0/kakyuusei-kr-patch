@@ -10,7 +10,7 @@ import io, os, re, struct, sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.dirname(__file__))
-import elfpak, poc
+import elfpak, fontprev, poc
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 W = lambda *p: os.path.join(ROOT, 'work', *p)
@@ -21,7 +21,7 @@ PITCH, CW, CH = 23.75, 22, 12
 KANA_BMP = 0x288800
 HIRA_BMP = 0x1DB000                              # 「かな」로 돌아갈 때 덮는 히라가나 조각(같은 480×100)
 HEADER = '주인공의 이름을 입력해 주세요'
-BUTTONS = {(433, 142, 500, 160): '1쪽', (505, 142, 572, 160): '2쪽',
+BUTTONS = {(433, 142, 500, 160): '자모', (505, 142, 572, 160): '음절',
            (433, 164, 500, 182): '지우기', (505, 164, 572, 182): '결정'}
 LABEL = '이름'                                  # 「名前」 자리, 「：」는 원본 그대로
 NAME = '켄타로'
@@ -79,7 +79,10 @@ def cov_text(text, cw, ch, pitch):
         big = Image.new('L', (lw * S, ch * S), 0); dr = ImageDraw.Draw(big)
         l, t, r, b = dr.textbbox((0, 0), '가', font=f)
         cl, ct, cr, cb = dr.textbbox((0, 0), c, font=f)
-        dr.text(((lw * S - (cr - cl)) // 2 - cl, (ch * S - (b - t)) // 2 - t), c, font=f, fill=255)
+        if fontprev.is_jamo(c):                      # 2026-11-22 자모판: 납작한 호환 자모를 «가» 잉크 상자에 맞춰 확대
+            bw = min(r - l, lw * S); big.paste(fontprev.jamo_fit(f, c, bw, b - t), ((lw * S - bw) // 2, (ch * S - (b - t)) // 2))
+        else:
+            dr.text(((lw * S - (cr - cl)) // 2 - cl, (ch * S - (b - t)) // 2 - t), c, font=f, fill=255)
         cov = np.repeat((np.asarray(big, np.float32) / 255).reshape(ch, S, lw, S).mean((1, 3)), 2, 1)
         x = int(round(xs[k])); out[:, x:x + cov.shape[1]] = np.maximum(out[:, x:x + cov.shape[1]], cov[:, :total - x])
     return out
@@ -137,7 +140,7 @@ def grid(view, pal, ox, oy, chars):
                 put(view, pal, box, rgb)
 
 def page1(view, pal):
-    grid(view, pal, 0, 0, poc.NAME_SYLL[:90])
+    grid(view, pal, 0, 0, poc.BOARD[:90])
     # 머리말(회색 띠 안, 글자 y12~23, x138~495 → 띠 가운데 맞춤)
     box = (104, 10, 536, 26); rgb = erase(view, pal, box, thr=40)
     cov = cov_text(HEADER, CW, CH, PITCH)
@@ -191,14 +194,14 @@ def main():
     s, ox, oy = find_offset(k0, v0, kpal)
     print('가타카나 조각 위치(807 기준) x=%d y=%d 바탕 일치 %.1f%%' % (ox, oy, s * 100))
     assert s > 0.6, '조각 위치를 못 찾음'
-    k1 = k0.copy(); grid(k1, kpal, ox, oy, poc.NAME_SYLL[90:])
+    k1 = k0.copy(); grid(k1, kpal, ox, oy, poc.BOARD[90:])
     open(W('poc', 'name_kana.bmp'), 'wb').write(from_view(kraw, k1[::-1]))
     preview(k0, k1, kpal, W('poc', 'name_p2.png'))
     hraw = load_kana(HIRA_BMP); hpal = bmp_split(hraw)[4]
     h0 = to_view(hraw)[::-1]
     s, hx, hy = find_offset(h0, v0, hpal)
     print('히라가나 조각 위치 x=%d y=%d 바탕 일치 %.1f%%' % (hx, hy, s * 100)); assert s > 0.6
-    h1 = h0.copy(); grid(h1, hpal, hx, hy, poc.NAME_SYLL[:90])
+    h1 = h0.copy(); grid(h1, hpal, hx, hy, poc.BOARD[:90])
     # 원본 조각은 807 같은 자리와 색 번호가 99.7% 같다 → 같던 화소는 1쪽 새 그림 번호를 그대로 써서 전환 때 깜빡임이 없게
     reg0 = v0[hy:hy + h0.shape[0], hx:hx + h0.shape[1]]; reg1 = v1[hy:hy + h0.shape[0], hx:hx + h0.shape[1]]
     h1 = np.where(reg0 == h0, reg1, h1).astype(np.uint8)
@@ -210,7 +213,7 @@ def main():
 # ── 선택된(초록) 버튼 스프라이트: NAME.DAT 앞 4장(かな·カナ·消す·決定, 80×22 8비트, VDP1 색 은행 1) (2026-10-23) ──
 # 사용자 스테이트 namein_v4 의 VDP1 명령표(바이트 뒤집음)로 확인: VRAM 0x520A0 80×22 → 화면 (505,142) = 「2쪽」 자리.
 HL_SIZE, HL_W, HL_H = 1760, 80, 22
-HL_LABELS = ['1쪽', '2쪽', '지우기', '결정']
+HL_LABELS = ['자모', '음절', '지우기', '결정']
 HL_CRAM = W('mem', 'namein_v4', 'CRAM.bin')              # u16 LE, 은행 1(0x100~)
 HL_BG = 0x34                                              # 초록 바탕
 HL_STEPS = [0.15, 0.4, 0.6, 0.85]                         # 덮임 → 원본 글자 색 단계(바탕·0x36·0x10·0x03·0x01 흰색)
